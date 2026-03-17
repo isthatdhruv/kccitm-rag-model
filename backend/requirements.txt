@@ -1,0 +1,31 @@
+# Core framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# MySQL
+aiomysql==0.2.0
+pymysql==1.1.1
+
+# Milvus (replaces faiss-cpu + chromadb + rank_bm25)
+pymilvus>=2.5.0,<2.6.0
+
+# Re-ranker (Phase 5, but install now)
+sentence-transformers==3.0.0
+
+# Utilities
+numpy==1.26.4
+httpx==0.27.0
+sse-starlette==2.1.0
+sqlparse==0.5.0
+tiktoken==0.7.0
+pydantic==2.8.0
+pydantic-settings==2.4.0
+aiosqlite==0.20.0
+apscheduler==3.10.4
+scikit-learn==1.5.0
+python-dotenv==1.0.1
+tqdm==4.66.0
