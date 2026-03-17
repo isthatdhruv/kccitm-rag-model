@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     CACHE_SIMILARITY_THRESHOLD: float = 0.92
     CACHE_TTL_HOURS: int = 24
 
+    # Ingestion / Embedding
+    EMBED_BATCH_SIZE: int = 50       # Texts per Ollama /api/embed call (CPU: 50, GPU: 200-500)
+    EMBED_CONCURRENCY: int = 1       # Parallel batch calls (CPU: 1, GPU: 2-4)
+
     # LLM settings
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 2048
