@@ -137,7 +137,10 @@ class Orchestrator:
 
         if not sql_result.success:
             # SQL failed — fall back to RAG
-            rag_result = await self.rag_pipeline.run(query, route_result, chat_history)
+            rag_result = await self.rag_pipeline.run(
+                query, route_result, chat_history,
+                use_optimizations=settings.RAG_USE_OPTIMIZATIONS,
+            )
             return QueryResponse(
                 success=rag_result.success,
                 response=rag_result.response,
@@ -149,7 +152,10 @@ class Orchestrator:
 
         if sql_result.row_count == 0:
             # SQL returned no rows — try RAG for context
-            rag_result = await self.rag_pipeline.run(query, route_result, chat_history)
+            rag_result = await self.rag_pipeline.run(
+                query, route_result, chat_history,
+                use_optimizations=settings.RAG_USE_OPTIMIZATIONS,
+            )
             if rag_result.success and rag_result.chunk_count > 0:
                 return QueryResponse(
                     success=True,
@@ -190,7 +196,10 @@ class Orchestrator:
         chat_history: list[dict] | None,
     ) -> QueryResponse:
         """Handle RAG-routed queries."""
-        rag_result = await self.rag_pipeline.run(query, route_result, chat_history)
+        rag_result = await self.rag_pipeline.run(
+            query, route_result, chat_history,
+            use_optimizations=settings.RAG_USE_OPTIMIZATIONS,
+        )
 
         return QueryResponse(
             success=rag_result.success,
@@ -214,7 +223,12 @@ class Orchestrator:
         """
         # Run both pipelines in parallel
         sql_task = asyncio.create_task(self.sql_pipeline.run(query, route_result))
-        rag_task = asyncio.create_task(self.rag_pipeline.retrieve_only(query, route_result))
+        rag_task = asyncio.create_task(
+            self.rag_pipeline.retrieve_only(
+                query, route_result,
+                use_optimizations=settings.RAG_USE_OPTIMIZATIONS,
+            )
+        )
 
         sql_result, rag_chunks = await asyncio.gather(sql_task, rag_task)
 
