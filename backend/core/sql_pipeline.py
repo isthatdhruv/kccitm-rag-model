@@ -42,7 +42,7 @@ Table: semester_results
 - id INT AUTO_INCREMENT PRIMARY KEY
 - roll_no VARCHAR(20) — FK to students.roll_no
 - semester INT — Semester number (1-8)
-- session VARCHAR(100) — Academic session (e.g., "2021-22 (REGULAR)")
+- session VARCHAR(100) — Academic session. Format is ALWAYS "Session : YYYY-YY(TYPE)" e.g., "Session : 2021-22(REGULAR)", "Session : 2022-23(BACK)", "Session : 2023-24(EX-STUDENT)". Types: REGULAR, BACK, EX-STUDENT, RE-ADMITTED. Use LIKE '%2022-23%' to match any 2022-23 session.
 - sgpa DECIMAL(4,2) — Semester GPA (0.00 to 10.00)
 - total_marks INT — Total marks obtained
 - result_status VARCHAR(20) — "PASS", "CP(0)", "CP( 0)", "FAIL", etc.
@@ -73,6 +73,9 @@ IMPORTANT NOTES:
 - back_paper = "--" means NO back paper. Any other value means the student has a back paper.
 - Some external_marks are NULL (for practicals like mini projects that only have internal marks)
 - grade can be empty string for CA (Continuous Assessment) type subjects
+- Session filtering: ALWAYS use LIKE '%YYYY-YY%' (e.g., session LIKE '%2022-23%'). Never use exact match or prefix LIKE '2022-23%'.
+- "Batch" in a user query means the academic year session (e.g., "2022-23 batch" → session LIKE '%2022-23%'), NOT the enrollment year from roll_no.
+- All current students are the 2021 batch (roll_no starts with '21'). No 2022-enrolled students exist.
 
 RULES:
 1. Generate ONLY SELECT statements. Never generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, or TRUNCATE.

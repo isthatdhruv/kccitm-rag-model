@@ -100,6 +100,7 @@ class OllamaClient:
             "model": model or self.model,
             "messages": messages,
             "stream": True,
+            "think": False,
             "options": {
                 "temperature": temperature if temperature is not None else settings.LLM_TEMPERATURE,
                 "num_predict": max_tokens or settings.LLM_MAX_TOKENS,
@@ -107,6 +108,8 @@ class OllamaClient:
         }
         url = f"{self.base_url}/api/chat"
 
+        pending = ""
+        in_think = False
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream("POST", url, json=payload) as response:
                 response.raise_for_status()
@@ -120,8 +123,38 @@ class OllamaClient:
                     if chunk.get("done"):
                         break
                     token = chunk.get("message", {}).get("content", "")
-                    if token:
-                        yield token
+                    if not token:
+                        continue
+                    pending += token
+                    # Buffer-based <think>...</think> filter — handles tags split across tokens
+                    while True:
+                        if in_think:
+                            end = pending.find("</think>")
+                            if end != -1:
+                                pending = pending[end + 8:]  # len("</think>") == 8
+                                in_think = False
+                            else:
+                                pending = pending[-8:] if len(pending) > 8 else pending
+                                break
+                        else:
+                            start = pending.find("<think>")
+                            if start != -1:
+                                to_yield = pending[:start]
+                                pending = pending[start + 7:]  # len("<think>") == 7
+                                in_think = True
+                                if to_yield:
+                                    yield to_yield
+                            else:
+                                # Hold last 6 chars in case "<think>" straddles a boundary
+                                if len(pending) > 6:
+                                    to_yield = pending[:-6]
+                                    pending = pending[-6:]
+                                    if to_yield:
+                                        yield to_yield
+                                break
+        # Flush any remaining content after stream ends
+        if not in_think and pending:
+            yield pending
 
     async def embed(self, text: str, model: str | None = None) -> list[float]:
         """Generate embedding vector for a single text (768-dim for nomic-embed-text)."""

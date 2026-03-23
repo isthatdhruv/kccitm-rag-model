@@ -34,8 +34,8 @@ class Settings(BaseSettings):
 
     # Ollama
     OLLAMA_HOST: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen3:8b"
-    OLLAMA_DRAFT_MODEL: str = "qwen3:1.7b"
+    OLLAMA_MODEL: str = "llama3.2:3b"
+    OLLAMA_DRAFT_MODEL: str = "llama3.2:3b"
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
     OLLAMA_EMBED_DIM: int = 768
 
