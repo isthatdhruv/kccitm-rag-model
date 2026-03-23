@@ -1,14 +1,22 @@
-"""RAG pipeline: embed query → Milvus hybrid search → assemble context → generate response.
+"""RAG pipeline: embed query -> Milvus hybrid search -> assemble context -> generate response.
 
-This is the Phase 4 (basic) version. Phase 5 adds HyDE, multi-query expansion,
-cross-encoder re-ranking, and contextual compression on top of this.
+Phase 4 basic pipeline + Phase 5 optimizations:
+- HyDE (Hypothetical Document Embeddings)
+- Multi-query expansion with RRF merge
+- Cross-encoder re-ranking
+- Contextual compression
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from config import settings
+from core.compressor import ContextualCompressor
+from core.hyde import HyDEGenerator
 from core.llm_client import OllamaClient
+from core.multi_query import MultiQueryExpander
+from core.reranker import ChunkReranker
 from core.router import RouteResult
 from db.milvus_client import MilvusSearchClient
 
@@ -62,102 +70,216 @@ class RAGResult:
 
 class RAGPipeline:
     """
-    Basic RAG pipeline: embed query → Milvus hybrid search → assemble context → generate response.
+    RAG pipeline with optional advanced optimizations.
+
+    When use_optimizations=True (default):
+    HyDE -> multi-query expand -> retrieve (parallel) -> RRF merge -> re-rank -> compress -> generate
+
+    When use_optimizations=False:
+    Basic flow: embed query -> retrieve -> assemble -> generate
     """
 
     def __init__(self, llm: OllamaClient, milvus: MilvusSearchClient):
         self.llm = llm
         self.milvus = milvus
+        # Optimization components
+        self.hyde = HyDEGenerator(llm)
+        self.multi_query = MultiQueryExpander(llm)
+        self.reranker = ChunkReranker()
+        self.compressor = ContextualCompressor(llm)
 
     async def run(
         self,
         query: str,
         route_result: RouteResult,
         chat_history: list[dict] | None = None,
+        use_optimizations: bool = True,
     ) -> RAGResult:
         """
-        Full RAG pipeline: retrieve relevant chunks and generate a response.
+        Full RAG pipeline.
 
         Args:
             query: User's natural language question
             route_result: RouteResult from router (has filters, entities, intent)
             chat_history: Optional conversation history for context
+            use_optimizations: If True, use HyDE + multi-query + re-rank + compress
 
         Returns:
             RAGResult with retrieved chunks, assembled context, and generated response
         """
         try:
-            # Step 1: Embed the query
-            query_embedding = await self.llm.embed(query)
-
-            # Step 2: Retrieve from Milvus (hybrid: dense + BM25 + optional filters)
-            chunks = self._retrieve(query, query_embedding, route_result)
-
-            if not chunks:
-                return RAGResult(
-                    success=True,
-                    chunks=[],
-                    chunk_count=0,
-                    context_text="",
-                    response="I couldn't find any relevant student data for your query. Could you rephrase or provide more details?",
-                )
-
-            # Step 3: Assemble context (chunks + chat history → formatted text)
-            context_text = self._assemble_context(chunks, chat_history)
-
-            # Step 4: Generate response using LLM
-            response = await self._generate_response(query, context_text, chat_history)
-
-            return RAGResult(
-                success=True,
-                chunks=chunks,
-                chunk_count=len(chunks),
-                context_text=context_text,
-                response=response,
-            )
-
+            if use_optimizations:
+                return await self._run_optimized(query, route_result, chat_history)
+            else:
+                return await self._run_basic(query, route_result, chat_history)
         except Exception as e:
             return RAGResult(success=False, error=f"RAG pipeline error: {str(e)}")
+
+    async def _run_optimized(
+        self,
+        query: str,
+        route_result: RouteResult,
+        chat_history: list[dict] | None,
+    ) -> RAGResult:
+        """Full optimized pipeline with HyDE + multi-query + re-rank + compress."""
+        filters = self._extract_filters(route_result)
+
+        # Step 1: HyDE + Multi-query expansion (parallel — independent LLM calls)
+        hyde_task = asyncio.create_task(self.hyde.generate_and_embed(query))
+        expand_task = asyncio.create_task(self.multi_query.expand(query))
+
+        (hyde_text, hyde_embedding), variants = await asyncio.gather(
+            hyde_task, expand_task
+        )
+
+        # Step 2: Embed all variants
+        all_queries = [query] + variants  # Original + up to 3 variants
+        all_embeddings = [hyde_embedding]  # Use HyDE embedding for the original
+
+        if variants:
+            variant_embeddings = await self.llm.embed_batch(variants)
+            all_embeddings.extend(variant_embeddings)
+
+        # Step 3: Milvus hybrid search for each query variant
+        all_results = []
+        for q_text, q_embedding in zip(all_queries, all_embeddings):
+            results = self.milvus.hybrid_search(
+                query_text=q_text,
+                query_embedding=q_embedding,
+                k=20,
+                filters=filters,
+            )
+            all_results.append(results)
+
+        # Step 4: Merge via RRF
+        merged = MultiQueryExpander.reciprocal_rank_fusion(all_results)
+        candidates = merged[:30]  # Top 30 for re-ranking
+
+        if not candidates:
+            return RAGResult(
+                success=True,
+                chunks=[],
+                chunk_count=0,
+                response="I couldn't find relevant student data for your query. Could you rephrase?",
+            )
+
+        # Step 5: Cross-encoder re-ranking (30 -> top 10)
+        reranked = self.reranker.rerank(query, candidates)
+
+        # Step 6: Contextual compression
+        compressed = await self.compressor.compress(query, reranked)
+
+        # Step 7: Assemble context and generate
+        context_text = self._assemble_context(compressed, chat_history)
+        response = await self._generate_response(query, context_text, chat_history)
+
+        return RAGResult(
+            success=True,
+            chunks=compressed,
+            chunk_count=len(compressed),
+            context_text=context_text,
+            response=response,
+        )
+
+    async def _run_basic(
+        self,
+        query: str,
+        route_result: RouteResult,
+        chat_history: list[dict] | None,
+    ) -> RAGResult:
+        """Basic pipeline (Phase 4 logic) — used when optimizations are off."""
+        query_embedding = await self.llm.embed(query)
+        filters = self._extract_filters(route_result)
+
+        chunks = self.milvus.hybrid_search(
+            query_text=query,
+            query_embedding=query_embedding,
+            k=settings.RAG_TOP_K,
+            filters=filters,
+        )
+
+        if not chunks:
+            return RAGResult(
+                success=True,
+                chunks=[],
+                chunk_count=0,
+                response="I couldn't find any relevant student data for your query. Could you rephrase or provide more details?",
+            )
+
+        context_text = self._assemble_context(chunks, chat_history)
+        response = await self._generate_response(query, context_text, chat_history)
+
+        return RAGResult(
+            success=True,
+            chunks=chunks,
+            chunk_count=len(chunks),
+            context_text=context_text,
+            response=response,
+        )
 
     async def retrieve_only(
         self,
         query: str,
         route_result: RouteResult,
+        use_optimizations: bool = True,
     ) -> list[dict]:
         """
         Retrieve chunks without generating a response.
-        Useful for the HYBRID route where SQL pipeline also runs.
+        Used by the HYBRID route where SQL pipeline also runs.
         """
-        query_embedding = await self.llm.embed(query)
-        return self._retrieve(query, query_embedding, route_result)
+        if not use_optimizations:
+            query_embedding = await self.llm.embed(query)
+            filters = self._extract_filters(route_result)
+            return self.milvus.hybrid_search(
+                query_text=query,
+                query_embedding=query_embedding,
+                k=settings.RAG_TOP_K,
+                filters=filters,
+            )
 
-    def _retrieve(
-        self,
-        query: str,
-        query_embedding: list[float],
-        route_result: RouteResult,
-    ) -> list[dict]:
-        """
-        Retrieve relevant chunks from Milvus.
+        # Optimized retrieval: HyDE + multi-query + re-rank + compress
+        filters = self._extract_filters(route_result)
 
-        Uses hybrid search (dense + BM25) by default.
-        Applies metadata filters if the router extracted them.
-        """
-        # Build filters from route_result
-        filters = {}
-        if route_result.needs_filter and route_result.filters:
-            for key in ("semester", "branch", "roll_no", "name", "course"):
-                val = route_result.filters.get(key)
-                if val is not None:
-                    filters[key] = val
-
-        # Run Milvus hybrid search (synchronous)
-        return self.milvus.hybrid_search(
-            query_text=query,
-            query_embedding=query_embedding,
-            k=settings.RAG_TOP_K,
-            filters=filters if filters else None,
+        hyde_task = asyncio.create_task(self.hyde.generate_and_embed(query))
+        expand_task = asyncio.create_task(self.multi_query.expand(query))
+        (hyde_text, hyde_embedding), variants = await asyncio.gather(
+            hyde_task, expand_task
         )
+
+        all_queries = [query] + variants
+        all_embeddings = [hyde_embedding]
+        if variants:
+            all_embeddings.extend(await self.llm.embed_batch(variants))
+
+        all_results = []
+        for q_text, q_embedding in zip(all_queries, all_embeddings):
+            results = self.milvus.hybrid_search(
+                query_text=q_text,
+                query_embedding=q_embedding,
+                k=20,
+                filters=filters,
+            )
+            all_results.append(results)
+
+        merged = MultiQueryExpander.reciprocal_rank_fusion(all_results)
+        reranked = self.reranker.rerank(query, merged[:30])
+        compressed = await self.compressor.compress(query, reranked)
+        return compressed
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _extract_filters(self, route_result: RouteResult) -> dict | None:
+        """Extract Milvus filters from RouteResult."""
+        if not route_result.needs_filter or not route_result.filters:
+            return None
+        filters = {}
+        for key in ("semester", "branch", "roll_no", "name", "course"):
+            val = route_result.filters.get(key)
+            if val is not None:
+                filters[key] = val
+        return filters if filters else None
 
     def _assemble_context(
         self,
@@ -170,7 +292,7 @@ class RAGPipeline:
         Rules:
         - Number each chunk [1], [2], etc.
         - Include a metadata header line before each chunk text
-        - Max 15 chunks in context
+        - Max 10 chunks in context
         - Truncate individual chunks to 500 chars if extremely long
         """
         max_chunks = 10
@@ -202,11 +324,7 @@ class RAGPipeline:
         context_text: str,
         chat_history: list[dict] | None = None,
     ) -> str:
-        """
-        Generate a natural language response using the LLM with retrieved context.
-
-        Uses chat() if chat_history is provided, otherwise generate().
-        """
+        """Generate a natural language response using the LLM with retrieved context."""
         system_prompt = RESPONSE_GENERATOR_PROMPT
 
         user_message = f"""Based on the following student data, answer the user's question.
@@ -218,7 +336,6 @@ Question: {query}"""
         if chat_history:
             messages = [{"role": "system", "content": system_prompt}]
 
-            # Add recent chat history (last 6 messages max)
             for msg in (chat_history or [])[-6:]:
                 messages.append({"role": msg["role"], "content": msg["content"]})
 

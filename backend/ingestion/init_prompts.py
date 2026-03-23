@@ -7,6 +7,9 @@ import asyncio
 import uuid
 
 from config import settings
+from core.compressor import COMPRESSION_PROMPT
+from core.hyde import HYDE_PROMPT
+from core.multi_query import MULTI_QUERY_PROMPT
 from core.rag_pipeline import RESPONSE_GENERATOR_PROMPT
 from core.router import ROUTER_SYSTEM_PROMPT
 from core.sql_pipeline import SQL_GENERATOR_SYSTEM_PROMPT
@@ -38,17 +41,17 @@ INITIAL_PROMPTS = [
     {
         "prompt_name": "hyde",
         "section_name": "system",
-        "content": "PLACEHOLDER — will be implemented in Phase 5",
+        "content": HYDE_PROMPT,
     },
     {
         "prompt_name": "multi_query",
         "section_name": "system",
-        "content": "PLACEHOLDER — will be implemented in Phase 5",
+        "content": MULTI_QUERY_PROMPT,
     },
     {
         "prompt_name": "compressor",
         "section_name": "system",
-        "content": "PLACEHOLDER — will be implemented in Phase 5",
+        "content": COMPRESSION_PROMPT,
     },
 ]
 
@@ -136,7 +139,39 @@ async def update_response_prompt() -> None:
             print(f"  response_generator/{section} already has real content, skipping")
 
 
+async def update_phase5_prompts() -> None:
+    """Replace Phase 5 placeholder prompts (hyde, multi_query, compressor) with real content."""
+    db = settings.db_path(settings.PROMPTS_DB)
+
+    replacements = [
+        ("hyde", "system", HYDE_PROMPT),
+        ("multi_query", "system", MULTI_QUERY_PROMPT),
+        ("compressor", "system", COMPRESSION_PROMPT),
+    ]
+
+    for prompt_name, section, content in replacements:
+        existing = await fetch_one(
+            db,
+            "SELECT id, content FROM prompt_templates WHERE prompt_name = ? AND section_name = ? AND is_active = 1",
+            (prompt_name, section),
+        )
+        if not existing:
+            print(f"  {prompt_name}/{section} not found — run init_prompts first")
+            continue
+
+        if "PLACEHOLDER" in existing["content"]:
+            await execute(
+                db,
+                "UPDATE prompt_templates SET content = ?, version = 1 WHERE id = ?",
+                (content, existing["id"]),
+            )
+            print(f"  \033[92m\u2713 Updated {prompt_name}/{section} prompt (replaced placeholder)\033[0m")
+        else:
+            print(f"  {prompt_name}/{section} already has real content, skipping")
+
+
 if __name__ == "__main__":
     asyncio.run(init_prompts())
     asyncio.run(update_sql_prompt())
     asyncio.run(update_response_prompt())
+    asyncio.run(update_phase5_prompts())

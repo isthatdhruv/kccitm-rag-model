@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # RAG settings
     RAG_TOP_K: int = 10
     RAG_RERANK_TOP_K: int = 10
+    RAG_USE_OPTIMIZATIONS: bool = True
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     CACHE_SIMILARITY_THRESHOLD: float = 0.92
     CACHE_TTL_HOURS: int = 24
